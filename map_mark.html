@@ -23,9 +23,9 @@
   <div id="map"></div>
 
   <script>
-    // ====== 配置 ======
-    const LIGHTCABLE_WS_URL = 'ws://localhost:8088/402'; // <- 如果在 docker-compose 中映射到 8088
-    const STATE_REST_BASE   = 'http://localhost:3000';  // <- state-server (Express) 的 HTTP 地址，通常是 3000
+    // ====== config ======
+    const LIGHTCABLE_WS_URL = 'ws://localhost:8088/402'; 
+    const STATE_REST_BASE   = 'http://localhost:3000';  
     // =================================================
 
     const GET_ANNOTATIONS_URL = STATE_REST_BASE + '/annotations';
@@ -33,8 +33,8 @@
     const PUT_ANNOTATION_URL = (id) => STATE_REST_BASE + '/annotations/' + encodeURIComponent(id);
     const DELETE_ANNOTATION_URL = (id) => STATE_REST_BASE + '/annotations/' + encodeURIComponent(id);
 
-    // 如果你在 server 端启用了 API_KEY 验证，请把它放在这里（或在 server 端临时关闭认证）
-    const API_KEY = null; // 'secret123' 或 null
+    // API_KEY verify
+    const API_KEY = null; 
 
     const clientId = 'c-' + Math.random().toString(36).slice(2,10);
     const statusEl = document.getElementById('status');
