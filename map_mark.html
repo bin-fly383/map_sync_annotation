@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Map Annotations with Redis Persistence + Lightcable (v1.3) - Clear All</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@latest/dist/maplibre-gl.css" />
+  <script src="https://unpkg.com/maplibre-gl@latest/dist/maplibre-gl.js"></script>
+  <style>
+    html,body,#map{height:100%;margin:0;padding:0;}
+    #hint{position:absolute;left:8px;top:8px;z-index:2;background:rgba(255,255,255,0.95);padding:8px;border-radius:6px;font-size:13px}
+    .status { margin-top:6px; font-size:12px; color:#333; }
+    #clearAllBtn { margin-top:8px; display:inline-block; padding:6px 8px; font-size:13px; border-radius:4px; border:1px solid #c00; background:#fff; color:#c00; cursor:pointer; }
+    #clearAllBtn[disabled] { opacity:0.6; cursor:not-allowed; }
+  </style>
+</head>
+<body>
+  <div id="hint">
+    点击地图添加标注（拖拽更新，右键删除）。<br>
+    <button id="clearAllBtn" title="删除所有标注并从持久化服务中移除">一键清除所有标注</button>
+    <div class="status" id="status">初始化...</div>
+  </div>
+  <div id="map"></div>
+
+  <script>
+    // ====== 配置 ======
+    const LIGHTCABLE_WS_URL = 'ws://localhost:8088/402'; // <- 如果在 docker-compose 中映射到 8088
+    const STATE_REST_BASE   = 'http://localhost:3000';  // <- state-server (Express) 的 HTTP 地址，通常是 3000
+    // =================================================
+
+    const GET_ANNOTATIONS_URL = STATE_REST_BASE + '/annotations';
+    const POST_ANNOTATION_URL = STATE_REST_BASE + '/annotations';
+    const PUT_ANNOTATION_URL = (id) => STATE_REST_BASE + '/annotations/' + encodeURIComponent(id);
+    const DELETE_ANNOTATION_URL = (id) => STATE_REST_BASE + '/annotations/' + encodeURIComponent(id);
+
+    // 如果你在 server 端启用了 API_KEY 验证，请把它放在这里（或在 server 端临时关闭认证）
+    const API_KEY = null; // 'secret123' 或 null
+
+    const clientId = 'c-' + Math.random().toString(36).slice(2,10);
+    const statusEl = document.getElementById('status');
+    const clearAllBtn = document.getElementById('clearAllBtn');
+
+    const map = new maplibregl.Map({
+      container: 'map',
+      style: 'https://demotiles.maplibre.org/style.json',
+      center: [0,0],
+      zoom: 2
+    });
+
+    const annotations = new Map();
+    function setStatus(t){ statusEl.textContent = t; }
+    function genId(){ return 'a-' + Math.random().toString(36).slice(2,11); }
+
+    function addAnnotationLocal(id, lngLat, opts = { draggable:true }){
+      if (annotations.has(id)) return;
+      const marker = new maplibregl.Marker({ draggable: opts.draggable })
+        .setLngLat(lngLat).addTo(map);
+      annotations.set(id, { marker, lngLat: [...lngLat] });
+
+      let dragTimeout = null;
+      marker.on('dragend', () => {
+        const p = marker.getLngLat(); const newLngLat = [p.lng,p.lat];
+        annotations.get(id).lngLat = newLngLat;
+        if (dragTimeout) clearTimeout(dragTimeout);
+        dragTimeout = setTimeout(()=> {
+          persistUpdate(id, newLngLat).catch(e=>console.warn('persist update err', e));
+          broadcastWS({ type:'update', id, lngLat: newLngLat, clientId });
+        }, 150);
+      });
+
+      marker.getElement().addEventListener('contextmenu', (ev) => {
+        ev.preventDefault();
+        removeAnnotationLocal(id);
+        persistDelete(id).catch(e=>console.warn('persist delete err', e));
+        broadcastWS({ type:'remove', id, clientId });
+      });
+    }
+
+    function updateAnnotationLocal(id, lngLat){
+      const ann = annotations.get(id);
+      if (!ann) { addAnnotationLocal(id, lngLat, { draggable:true }); return; }
+      ann.marker.setLngLat(lngLat); ann.lngLat = [...lngLat];
+    }
+    function removeAnnotationLocal(id){ const a = annotations.get(id); if (!a) return; a.marker.remove(); annotations.delete(id); }
+
+    // REST helpers (with optional API_KEY)
+    async function fetchInitialAnnotations(){
+      try {
+        setStatus('从持久化服务拉取历史标注...');
+        const headers = {};
+        if (API_KEY) headers['x-api-key'] = API_KEY;
+        const resp = await fetch(GET_ANNOTATIONS_URL, { cache:'no-store', headers });
+        if (!resp.ok) throw new Error('REST 返回 ' + resp.status);
+        const list = await resp.json();
+        if (!Array.isArray(list)) throw new Error('REST 返回格式错误');
+        clearAllLocalAnnotations();
+        list.forEach(item => { if (item && item.id && item.lngLat) addAnnotationLocal(item.id, item.lngLat); });
+        setStatus('已加载 ' + list.length + ' 个标注（来自持久化）');
+        return list;
+      } catch (e) {
+        console.warn('fetchInitialAnnotations fail', e);
+        setStatus('无法从持久化服务拉取历史（' + (e.message||e) + '）');
+        return null;
+      }
+    }
+    async function persistAdd(id, lngLat){
+      const headers = { 'Content-Type':'application/json' }; if (API_KEY) headers['x-api-key']=API_KEY;
+      const resp = await fetch(POST_ANNOTATION_URL, { method:'POST', headers, body: JSON.stringify({ id, lngLat, clientId }) });
+      if (!resp.ok) throw new Error('POST 返回 ' + resp.status); return await resp.json();
+    }
+    async function persistUpdate(id, lngLat){
+      const headers = { 'Content-Type':'application/json' }; if (API_KEY) headers['x-api-key']=API_KEY;
+      const resp = await fetch(PUT_ANNOTATION_URL(id), { method:'PUT', headers, body: JSON.stringify({ lngLat, clientId }) });
+      if (!resp.ok) throw new Error('PUT 返回 ' + resp.status); return await resp.json();
+    }
+    async function persistDelete(id){
+      const headers = {}; if (API_KEY) headers['x-api-key']=API_KEY;
+      const resp = await fetch(DELETE_ANNOTATION_URL(id), { method:'DELETE', headers });
+      if (!resp.ok) throw new Error('DELETE 返回 ' + resp.status); return true;
+    }
+
+    function clearAllLocalAnnotations(){ for (const id of Array.from(annotations.keys())) removeAnnotationLocal(id); }
+
+    // 新增：一键清除所有标注（本地 + 持久化 + 广播）
+    async function clearAllAnnotations(){
+      if (annotations.size === 0) { setStatus('当前没有标注可清除'); return; }
+      if (!confirm('确认删除所有标注吗？此操作会从本地和持久化存储中移除所有标注，无法撤销。')) return;
+
+      clearAllBtn.disabled = true;
+      setStatus('正在删除所有标注...');
+
+      // 收集要删除的 id（复制一份，避免在循环中修改 Map）
+      const ids = Array.from(annotations.keys());
+
+      // 1) 先从本地移除所有标注（用户体验优先）
+      clearAllLocalAnnotations();
+
+      // 2) 广播每个删除事件给其他客户端（保持兼容：不依赖服务端实现 bulk clear）
+      for (const id of ids) {
+        try { broadcastWS({ type:'remove', id, clientId }); } catch (e) { console.warn('broadcast remove err', e); }
+      }
+
+      // 3) 尝试在持久化服务端删除每个 id（并行）
+      const deletePromises = ids.map(id => persistDelete(id).catch(err => ({ id, err: (err&&err.message) || err })));
+      const results = await Promise.allSettled(deletePromises);
+
+      // 汇总结果
+      let failCount = 0;
+      for (const r of results) {
+        if (r.status === 'rejected') failCount++;
+        else if (r.value && r.value.err) failCount++;
+      }
+
+      if (failCount === 0) setStatus('已成功删除所有标注（共 ' + ids.length + ' 个）');
+      else setStatus('已删除本地标注，但有 ' + failCount + ' 个在持久化删除时出现错误（查看控制台）');
+
+      clearAllBtn.disabled = false;
+    }
+
+    // WS / Lightcable
+    let ws = null; let reconnectAttempts = 0; const MAX_RECONNECT_DELAY = 30000;
+    function broadcastWS(obj){ const msg = JSON.stringify(obj); if (ws && ws.readyState === WebSocket.OPEN) ws.send(msg); else console.warn('[WS] 未连接，broadcast 失败：', obj); }
+
+    function connectWS(){
+      try { ws = new WebSocket(LIGHTCABLE_WS_URL); } catch (e){ console.error('[WS] 创建失败', e); scheduleReconnect(); return; }
+      ws.onopen = async () => { console.log('[WS] open'); reconnectAttempts = 0; setStatus('实时通道已连接（clientId=' + clientId + '），尝试拉取持久化数据...'); await fetchInitialAnnotations(); };
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (!msg || !msg.type) return;
+          if (msg.clientId && msg.clientId === clientId) return;
+          if (msg.type === 'add' && msg.id && msg.lngLat) { if (!annotations.has(msg.id)) addAnnotationLocal(msg.id, msg.lngLat); return; }
+          if (msg.type === 'update' && msg.id && msg.lngLat) { updateAnnotationLocal(msg.id, msg.lngLat); return; }
+          if (msg.type === 'remove' && msg.id) { removeAnnotationLocal(msg.id); return; }
+          // 兼容：如果将来有服务端支持 "clear_all"，也可处理：
+          if (msg.type === 'clear_all') { clearAllLocalAnnotations(); return; }
+        } catch (e) { console.error('[WS] message parse err', e); }
+      };
+      ws.onerror = (e) => { console.error('[WS] error', e); };
+      ws.onclose = () => { console.warn('[WS] closed, scheduling reconnect'); scheduleReconnect(); };
+    }
+    function scheduleReconnect(){ ws = null; reconnectAttempts++; const delay = Math.min(1000 * Math.pow(1.5, reconnectAttempts), MAX_RECONNECT_DELAY); setStatus('实时通道断开，' + Math.round(delay/1000) + 's 后重连...'); setTimeout(()=>{ setStatus('尝试重连实时通道...'); connectWS(); }, delay); }
+
+    // map interactions
+    map.on('load', async () => {
+      await fetchInitialAnnotations(); // 初始加载
+      connectWS(); // 再连 WS（WS 连接成功时也会再次 fetch 以确保补偿）
+      map.on('click', async (e) => {
+        const id = genId(); const lngLat = [e.lngLat.lng, e.lngLat.lat];
+        addAnnotationLocal(id, lngLat, { draggable:true });
+        setStatus('新增标注（本地）: ' + id);
+        persistAdd(id, lngLat).then(() => setStatus('已保存到持久化（id=' + id + '）')).catch(err => setStatus('保存到持久化失败（' + (err.message||err) + '）'));
+        broadcastWS({ type:'add', id, lngLat, clientId });
+      });
+
+      // 绑定清除按钮
+      clearAllBtn.addEventListener('click', () => { clearAllAnnotations().catch(e => { console.error('clearAllAnnotations err', e); setStatus('清除失败（查看控制台）'); clearAllBtn.disabled = false; }); });
+    });
+
+    window.addEventListener('beforeunload', ()=>{ try{ if (ws) ws.close(); } catch(e){} });
+
+  </script>
+</body>
+</html>
