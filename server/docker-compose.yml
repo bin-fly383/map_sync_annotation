@@ -1,0 +1,42 @@
+version: '3.8'
+services:
+  redis:
+    image: redis:7
+    container_name: map_redis
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./redis-data:/data
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  lightcable:
+    image: ghcr.io/a-wing/lightcable:latest
+    container_name: map_lightcable
+    # 将容器内 8080 暴露到宿主的 8088（与你之前使用的端口保持一致）
+    ports:
+      - "8088:8080"
+    # environment 必须是 mapping（即键值对）或一个列表，即使暂时不需要也可写成 {}
+    environment: {}
+    restart: unless-stopped
+
+  state-server:
+    build: .
+    container_name: map_state_server
+    environment:
+      - PORT=3000
+      - REDIS_URL=redis://redis:6379
+      - LIGHTCABLE_WS_URL=ws://lightcable:8080/402
+      - API_KEY=${API_KEY:-}
+      - CORS_ORIGIN=${CORS_ORIGIN:-*}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - redis
+      - lightcable
+    # 不挂载整个项目目录（使用镜像内已安装的依赖）
+    # 如果你只是要测试，不需要实时修改代码，直接删掉这段即可
+    # volumes:
+    #   - ./:/usr/src/app:ro
+    restart: unless-stopped
