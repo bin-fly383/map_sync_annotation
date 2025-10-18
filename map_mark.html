@@ -121,7 +121,7 @@
 
     function clearAllLocalAnnotations(){ for (const id of Array.from(annotations.keys())) removeAnnotationLocal(id); }
 
-    // 新增：一键清除所有标注（本地 + 持久化 + 广播）
+    // Clear all annotations with one click (local + persistent + broadcast)
     async function clearAllAnnotations(){
       if (annotations.size === 0) { setStatus('当前没有标注可清除'); return; }
       if (!confirm('确认删除所有标注吗？此操作会从本地和持久化存储中移除所有标注，无法撤销。')) return;
@@ -129,22 +129,22 @@
       clearAllBtn.disabled = true;
       setStatus('正在删除所有标注...');
 
-      // 收集要删除的 id（复制一份，避免在循环中修改 Map）
+      // Collect the ids to be deleted (make a copy to avoid modifying the Map in the loop)
       const ids = Array.from(annotations.keys());
 
-      // 1) 先从本地移除所有标注（用户体验优先）
+      // 1) Remove all annotations locally first (user experience first)
       clearAllLocalAnnotations();
 
-      // 2) 广播每个删除事件给其他客户端（保持兼容：不依赖服务端实现 bulk clear）
+      // 2) Broadcast each delete event to other clients (to maintain compatibility: not relying on the server to implement bulk clear)
       for (const id of ids) {
         try { broadcastWS({ type:'remove', id, clientId }); } catch (e) { console.warn('broadcast remove err', e); }
       }
 
-      // 3) 尝试在持久化服务端删除每个 id（并行）
+      // 3) Try to delete each id on the persistence server (in parallel)
       const deletePromises = ids.map(id => persistDelete(id).catch(err => ({ id, err: (err&&err.message) || err })));
       const results = await Promise.allSettled(deletePromises);
 
-      // 汇总结果
+      // Summarize the results
       let failCount = 0;
       for (const r of results) {
         if (r.status === 'rejected') failCount++;
@@ -172,7 +172,7 @@
           if (msg.type === 'add' && msg.id && msg.lngLat) { if (!annotations.has(msg.id)) addAnnotationLocal(msg.id, msg.lngLat); return; }
           if (msg.type === 'update' && msg.id && msg.lngLat) { updateAnnotationLocal(msg.id, msg.lngLat); return; }
           if (msg.type === 'remove' && msg.id) { removeAnnotationLocal(msg.id); return; }
-          // 兼容：如果将来有服务端支持 "clear_all"，也可处理：
+          // Compatibility: If a server supports "clear_all" in the future, it can also handle:
           if (msg.type === 'clear_all') { clearAllLocalAnnotations(); return; }
         } catch (e) { console.error('[WS] message parse err', e); }
       };
@@ -183,8 +183,8 @@
 
     // map interactions
     map.on('load', async () => {
-      await fetchInitialAnnotations(); // 初始加载
-      connectWS(); // 再连 WS（WS 连接成功时也会再次 fetch 以确保补偿）
+      await fetchInitialAnnotations(); // Initial Loading
+      connectWS(); // Reconnect to WS (if WS connection is successful, it will fetch again to ensure compensation)
       map.on('click', async (e) => {
         const id = genId(); const lngLat = [e.lngLat.lng, e.lngLat.lat];
         addAnnotationLocal(id, lngLat, { draggable:true });
@@ -193,7 +193,7 @@
         broadcastWS({ type:'add', id, lngLat, clientId });
       });
 
-      // 绑定清除按钮
+      // Bind clear button
       clearAllBtn.addEventListener('click', () => { clearAllAnnotations().catch(e => { console.error('clearAllAnnotations err', e); setStatus('清除失败（查看控制台）'); clearAllBtn.disabled = false; }); });
     });
 
